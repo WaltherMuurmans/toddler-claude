@@ -1,5 +1,7 @@
+use crate::claude_setup;
 use crate::credentials::{self, keys};
 use crate::fly::FlyClient;
+use crate::fly_setup;
 use crate::github_oauth::{self, DeviceStart, Repo};
 use crate::session::{self, Session, StartParams};
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,14 @@ pub async fn has_claude_token() -> Result<bool, String> {
 #[tauri::command]
 pub async fn clear_claude_token() -> Result<(), String> {
     credentials::delete(keys::CLAUDE_TOKEN).map_err(e)
+}
+
+/// Runs `claude setup-token`, auto-opens the browser, captures the resulting
+/// token, and stores it. Emits `claude-setup-log` events to the frontend.
+#[tauri::command]
+pub async fn claude_auto_setup(app: AppHandle) -> Result<(), String> {
+    let token = claude_setup::run(app).await.map_err(e)?;
+    credentials::set(keys::CLAUDE_TOKEN, &token).map_err(e)
 }
 
 #[tauri::command]
@@ -55,6 +65,34 @@ pub async fn list_github_repos() -> Result<Vec<Repo>, String> {
     github_oauth::list_repos(&token).await.map_err(e)
 }
 
+/// One-click: take the token already stored by `gh auth login` on this machine
+/// and reuse it. Returns the signed-in username on success.
+#[tauri::command]
+pub async fn github_cli_signin() -> Result<String, String> {
+    let token = tauri::async_runtime::spawn_blocking(github_oauth::gh_cli_token)
+        .await
+        .map_err(|e| format!("task join: {e}"))?
+        .map_err(e)?;
+    // Verify + fetch login
+    let client = reqwest::Client::new();
+    let v: serde_json::Value = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "ToddlerClaude/0.1")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(e)?
+        .error_for_status()
+        .map_err(e)?
+        .json()
+        .await
+        .map_err(e)?;
+    let login = v["login"].as_str().unwrap_or("(unknown)").to_string();
+    credentials::set(keys::GITHUB_TOKEN, &token).map_err(e)?;
+    Ok(login)
+}
+
 #[tauri::command]
 pub async fn store_fly_token(token: String) -> Result<String, String> {
     let client = FlyClient::new(&token);
@@ -66,6 +104,26 @@ pub async fn store_fly_token(token: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn has_fly_token() -> Result<bool, String> {
     Ok(credentials::get(keys::FLY_TOKEN).map_err(e)?.is_some())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FlySigninResult {
+    pub email: String,
+    pub orgs: Vec<String>,
+}
+
+/// One-click: reuse existing `flyctl auth` session and fetch orgs.
+#[tauri::command]
+pub async fn fly_cli_signin() -> Result<FlySigninResult, String> {
+    let token = tauri::async_runtime::spawn_blocking(fly_setup::flyctl_token)
+        .await
+        .map_err(|e| format!("task join: {e}"))?
+        .map_err(e)?;
+    let client = FlyClient::new(&token);
+    let email = client.verify().await.map_err(e)?;
+    let orgs = fly_setup::list_orgs(&token).await.map_err(e)?;
+    credentials::set(keys::FLY_TOKEN, &token).map_err(e)?;
+    Ok(FlySigninResult { email, orgs })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

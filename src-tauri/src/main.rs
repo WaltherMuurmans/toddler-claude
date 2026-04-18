@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod claude_setup;
+mod commands;
 mod credentials;
 mod fly;
+mod fly_setup;
 mod github_oauth;
 mod session;
-mod commands;
 
 use tauri::Manager;
 
@@ -19,15 +21,18 @@ fn main() {
             commands::store_claude_token,
             commands::has_claude_token,
             commands::clear_claude_token,
+            commands::claude_auto_setup,
             commands::github_device_start,
             commands::github_device_poll,
             commands::store_github_token,
             commands::has_github_token,
             commands::list_github_repos,
+            commands::github_cli_signin,
             commands::save_config,
             commands::load_config,
             commands::store_fly_token,
             commands::has_fly_token,
+            commands::fly_cli_signin,
             commands::start_session,
             commands::stop_session,
             commands::session_status,

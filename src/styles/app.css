@@ -250,3 +250,26 @@ details summary {
   cursor: pointer;
   margin: 12px 0;
 }
+
+.log {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--muted);
+  margin: 8px 0;
+}
+
+.device-prompt {
+  background: var(--panel-2);
+  padding: 16px;
+  border-radius: 8px;
+  margin: 12px 0;
+  text-align: center;
+}

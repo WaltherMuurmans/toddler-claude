@@ -28,6 +28,8 @@ keyring = "3"
 log = "0.4"
 env_logger = "0.11"
 dirs = "5"
+which = "6"
+webbrowser = "1"
 
 [features]
 default = ["custom-protocol"]

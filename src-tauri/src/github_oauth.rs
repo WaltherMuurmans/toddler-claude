@@ -3,7 +3,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+// GitHub CLI's own OAuth App client_id — public, allows device flow.
+// Has scopes: repo, gist, read:org, user, workflow, write:packages, delete:packages.
+// Consent screen will say "GitHub CLI"; to rebrand as "Toddler Claude" register
+// your own OAuth App and replace this constant. See docs/SETUP.md.
+const CLIENT_ID: &str = "178c6fc778ccc68e1d6a";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStart {
@@ -19,6 +23,7 @@ pub async fn device_start() -> Result<DeviceStart> {
     let res: Value = client
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
+        .header("User-Agent", "ToddlerClaude/0.1")
         .form(&[
             ("client_id", CLIENT_ID),
             ("scope", "repo read:user read:org"),
@@ -29,8 +34,21 @@ pub async fn device_start() -> Result<DeviceStart> {
         .json()
         .await?;
 
+    if let Some(err) = res["error"].as_str() {
+        return Err(anyhow!(
+            "GitHub device flow start failed: {} ({})",
+            err,
+            res["error_description"].as_str().unwrap_or("")
+        ));
+    }
+
+    let device_code = res["device_code"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing device_code in response: {}", res))?
+        .to_string();
+
     Ok(DeviceStart {
-        device_code: res["device_code"].as_str().unwrap_or_default().to_string(),
+        device_code,
         user_code: res["user_code"].as_str().unwrap_or_default().to_string(),
         verification_uri: res["verification_uri"]
             .as_str()
@@ -46,6 +64,7 @@ pub async fn device_poll(device_code: &str) -> Result<Option<String>> {
     let res: Value = client
         .post("https://github.com/login/oauth/access_token")
         .header("Accept", "application/json")
+        .header("User-Agent", "ToddlerClaude/0.1")
         .form(&[
             ("client_id", CLIENT_ID),
             ("device_code", device_code),
@@ -58,15 +77,46 @@ pub async fn device_poll(device_code: &str) -> Result<Option<String>> {
         .await?;
 
     if let Some(token) = res["access_token"].as_str() {
-        return Ok(Some(token.to_string()));
+        if !token.is_empty() {
+            return Ok(Some(token.to_string()));
+        }
     }
     if let Some(err) = res["error"].as_str() {
         match err {
             "authorization_pending" | "slow_down" => return Ok(None),
-            _ => return Err(anyhow!("github device auth error: {}", err)),
+            _ => {
+                return Err(anyhow!(
+                    "GitHub device poll error: {} ({})",
+                    err,
+                    res["error_description"].as_str().unwrap_or("")
+                ))
+            }
         }
     }
     Ok(None)
+}
+
+/// Fast path: if the user already has `gh` CLI authed on this machine,
+/// grab its token directly. Zero browser interaction.
+pub fn gh_cli_token() -> Result<String> {
+    use std::process::Command;
+    let out = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .map_err(|e| anyhow!("gh CLI not found on PATH: {}", e))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "gh auth token failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err(anyhow!(
+            "gh auth token returned empty; run `gh auth login` first"
+        ));
+    }
+    Ok(token)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
