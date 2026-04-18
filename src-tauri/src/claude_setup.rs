@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-fn strip_ansi(s: &str) -> String {
+pub fn strip_ansi(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -51,7 +51,7 @@ fn strip_ansi(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_token(line: &str) -> Option<String> {
+pub fn extract_token(line: &str) -> Option<String> {
     for needle in ["sk-ant-oat", "oat_"] {
         if let Some(pos) = line.find(needle) {
             let rest = &line[pos..];
@@ -67,7 +67,7 @@ fn extract_token(line: &str) -> Option<String> {
     None
 }
 
-fn extract_url(text: &str) -> Option<String> {
+pub fn extract_url(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let mut search_from = 0usize;
     while let Some(rel) = lower[search_from..].find("https://") {
@@ -110,7 +110,7 @@ fn log(app: &AppHandle, start: Instant, msg: impl std::fmt::Display) {
 /// Spawn `cmd.exe /c "<claude> setup-token > <temp> 2>&1"` with a hidden
 /// new console. Returns the Windows PROCESS_INFORMATION so caller can wait/kill.
 #[cfg(windows)]
-fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
+pub fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
     use windows::core::PWSTR;
     use windows::Win32::System::Threading::{
         CreateProcessW, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
@@ -151,15 +151,15 @@ fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
 }
 
 #[cfg(windows)]
-struct HiddenChild {
-    process: windows::Win32::Foundation::HANDLE,
-    thread: windows::Win32::Foundation::HANDLE,
-    pid: u32,
+pub struct HiddenChild {
+    pub process: windows::Win32::Foundation::HANDLE,
+    pub thread: windows::Win32::Foundation::HANDLE,
+    pub pid: u32,
 }
 
 #[cfg(windows)]
 impl HiddenChild {
-    fn try_wait(&self) -> Option<u32> {
+    pub fn try_wait(&self) -> Option<u32> {
         use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
         unsafe {
@@ -176,7 +176,7 @@ impl HiddenChild {
         }
     }
 
-    fn kill(&self) {
+    pub fn kill(&self) {
         use windows::Win32::System::Threading::TerminateProcess;
         unsafe {
             let _ = TerminateProcess(self.process, 1);

@@ -114,6 +114,44 @@ async fn run_test(name: &str) -> anyhow::Result<serde_json::Value> {
             "github": credentials::get(keys::GITHUB_TOKEN)?.is_some(),
             "fly":    credentials::get(keys::FLY_TOKEN)?.is_some(),
         })),
+        "claude-probe" => {
+            // Spawn claude setup-token exactly like the app does, watch ~12s,
+            // report: did it start, does the output contain the raw-mode error,
+            // did a URL appear, did a token appear.
+            use std::time::Instant;
+            let bin = tool_discovery::find_claude()
+                .ok_or_else(|| anyhow::anyhow!("claude not found"))?;
+            let tempfile = std::env::temp_dir().join(format!(
+                "tc-claude-probe-{}.log",
+                uuid::Uuid::new_v4().as_simple()
+            ));
+            std::fs::write(&tempfile, b"")?;
+            let cmdline = format!(
+                "cmd.exe /c \"\"{}\" setup-token > \"{}\" 2>&1\"",
+                bin.display(),
+                tempfile.display()
+            );
+            let child = crate::claude_setup::spawn_hidden_console(&cmdline)?;
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            child.kill();
+            let bytes = std::fs::read(&tempfile).unwrap_or_default();
+            let content = String::from_utf8_lossy(&bytes).into_owned();
+            let clean = crate::claude_setup::strip_ansi(&content);
+            let has_raw = clean.contains("Raw mode is not supported");
+            let has_welcome = clean.contains("Welcome to Claude Code");
+            let url = crate::claude_setup::extract_url(&clean);
+            let token = crate::claude_setup::extract_token(&clean);
+            let _ = std::fs::remove_file(&tempfile);
+            Ok(json!({
+                "size_bytes": bytes.len(),
+                "ink_raw_mode_error": has_raw,
+                "printed_welcome": has_welcome,
+                "url_found": url,
+                "token_found": token.map(|t| format!("{}…({} chars)", &t[..20.min(t.len())], t.len())),
+                "head": clean.chars().take(400).collect::<String>(),
+                "tail": clean.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>(),
+            }))
+        }
         "keyring-roundtrip" => {
             let marker = format!("test-{}", uuid::Uuid::new_v4());
             let key = "test_roundtrip";
