@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openExternal } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+const openExternal = (url: string) => openUrl(url);
 import { AppConfig } from "../App";
 
 interface Repo {
