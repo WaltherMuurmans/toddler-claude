@@ -1,0 +1,24 @@
+# Reference fly.toml. The Tauri app does not use this file directly — it
+# creates per-session apps via the Machines REST API — but this documents
+# the equivalent machine config for humans inspecting the project.
+
+app = "toddler-template"
+primary_region = "fra"
+
+[build]
+  image = "ghcr.io/walthermuurmans/toddler-claude-remote:latest"
+
+[[services]]
+  internal_port = 7681
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = false
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

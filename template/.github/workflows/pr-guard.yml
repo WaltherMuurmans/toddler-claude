@@ -1,0 +1,31 @@
+name: pr-guard
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  sensitive-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check sensitive paths
+        run: |
+          set -euo pipefail
+          BASE="origin/${{ github.base_ref }}"
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          CHANGED=$(git diff --name-only "$BASE"...HEAD || true)
+          echo "Changed files:"
+          echo "$CHANGED"
+          SENSITIVE=$(echo "$CHANGED" | grep -E '^(\.github/|\.claude/|\.devcontainer/|infra/|backend/migrations/|ios/|android/)' || true)
+          if [ -n "$SENSITIVE" ]; then
+            echo "::warning::Sensitive paths changed — CODEOWNERS approval required"
+            echo "$SENSITIVE"
+          else
+            echo "No sensitive paths changed."
+          fi

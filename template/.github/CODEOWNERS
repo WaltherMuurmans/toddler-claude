@@ -1,0 +1,9 @@
+# Replace @OWNER with your GitHub username before committing.
+*                          @OWNER
+/.github/                  @OWNER
+/.claude/                  @OWNER
+/.devcontainer/            @OWNER
+/infra/                    @OWNER
+/backend/migrations/       @OWNER
+/ios/                      @OWNER
+/android/                  @OWNER

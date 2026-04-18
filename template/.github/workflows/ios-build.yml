@@ -1,0 +1,30 @@
+name: ios-build
+on:
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'ios/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+  workflow_dispatch:
+
+jobs:
+  trigger-codemagic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kick Codemagic build
+        env:
+          TOKEN: ${{ secrets.CODEMAGIC_TOKEN }}
+          APP_ID: ${{ secrets.CODEMAGIC_APP_ID }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$APP_ID" ]; then
+            echo "CODEMAGIC_TOKEN / CODEMAGIC_APP_ID not configured. Skipping iOS build trigger."
+            exit 0
+          fi
+          curl -fsS -X POST https://api.codemagic.io/builds \
+            -H "x-auth-token: $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"appId\":\"$APP_ID\",\"workflowId\":\"ios-workflow\",\"branch\":\"$BRANCH\"}" \
+            | tee build.json
+          jq -r '.buildId // .message' build.json

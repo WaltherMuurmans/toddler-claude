@@ -1,0 +1,10 @@
+
+  ╭──────────────────────────────────────────────────────╮
+  │  Toddler Claude — remote session                     │
+  │                                                      │
+  │  Tell Claude what you want. It will edit files and   │
+  │  open a pull request when done.                      │
+  │                                                      │
+  │  This machine auto-stops after 15 min idle, or 2h.   │
+  │  Closing this window ends the session.               │
+  ╰──────────────────────────────────────────────────────╯
