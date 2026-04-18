@@ -41,7 +41,7 @@
     "longDescription": "One-click ephemeral remote Claude Code sessions with subscription auth, isolated Fly.io VMs, and hardened GitHub repo access.",
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
+        "installMode": "currentUser",
         "displayLanguageSelector": false
       }
     }
