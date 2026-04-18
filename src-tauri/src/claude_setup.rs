@@ -1,48 +1,44 @@
-//! Spawns `claude setup-token` inside a ConPTY so the bun CLI sees a real
-//! terminal, then captures the token it prints after browser approval.
+//! Runs `claude setup-token` in a **hidden** real Windows console so Ink's
+//! raw-mode TTY check passes (portable-pty's ConPTY wasn't enough for
+//! bun-bundled Ink). Redirects stdout+stderr to a temp file; we poll the
+//! file for the URL (to open the browser) and the final OAuth token.
 
 use anyhow::{anyhow, Result};
-use portable_pty::{CommandBuilder, PtySize};
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-/// Remove ANSI escape sequences (CSI, OSC, simple ESC) and other control
-/// bytes (keep \n \r \t) from a string.
-fn strip_ansi(input: &str) -> String {
-    let bytes = input.as_bytes();
+fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b == 0x1b {
-            if i + 1 < bytes.len() {
-                let n = bytes[i + 1];
-                if n == b'[' {
-                    i += 2;
-                    while i < bytes.len() && !((0x40..=0x7e).contains(&bytes[i])) {
-                        i += 1;
-                    }
+        if b == 0x1b && i + 1 < bytes.len() {
+            let n = bytes[i + 1];
+            if n == b'[' {
+                i += 2;
+                while i < bytes.len() && !((0x40..=0x7e).contains(&bytes[i])) {
                     i += 1;
-                    continue;
-                } else if n == b']' {
-                    i += 2;
-                    while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != 0x1b {
-                        i += 1;
-                    }
-                    if i < bytes.len() && bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                } else {
-                    i += 2;
-                    continue;
                 }
+                i += 1;
+                continue;
+            } else if n == b']' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != 0x1b {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
             } else {
-                break;
+                i += 2;
+                continue;
             }
         }
         if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
@@ -72,70 +68,146 @@ fn extract_token(line: &str) -> Option<String> {
 }
 
 fn extract_url(text: &str) -> Option<String> {
-    // Find the first https:// substring that contains anthropic or claude domain.
     let lower = text.to_lowercase();
     let mut search_from = 0usize;
-    while let Some(rel_pos) = lower[search_from..].find("https://") {
-        let pos = search_from + rel_pos;
-        let rest_chars: Vec<char> = text[pos..].chars().collect();
-        let mut end = 0usize;
-        for c in rest_chars.iter() {
-            if c.is_whitespace()
-                || *c == '"'
-                || *c == '\''
-                || *c == '<'
-                || *c == '>'
-                || *c == '`'
-                || *c == '('
-                || *c == ')'
-                || *c == '[' || *c == ']'
-                || *c == ','
-                || *c == ';'
-            {
-                break;
-            }
-            end += c.len_utf8();
-        }
-        if end > 15 {
-            let url = text[pos..pos + end].to_string();
-            let url_lower = url.to_lowercase();
-            if url_lower.contains("anthropic.com")
-                || url_lower.contains("claude.ai")
-                || url_lower.contains("claude.com")
-            {
-                return Some(url);
-            }
+    while let Some(rel) = lower[search_from..].find("https://") {
+        let pos = search_from + rel;
+        let rest = &text[pos..];
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, '"' | '\'' | '<' | '>' | '`' | '(' | ')' | '[' | ']' | ',' | ';')
+            })
+            .unwrap_or(rest.len());
+        let url = &rest[..end];
+        let ul = url.to_lowercase();
+        if url.len() > 15
+            && (ul.contains("anthropic.com") || ul.contains("claude.ai") || ul.contains("claude.com"))
+        {
+            return Some(url.to_string());
         }
         search_from = pos + 8;
     }
     None
 }
 
-/// Open a URL on Windows in a way that doesn't block behind ShellExecute
-/// weirdness: use `cmd /c start "" <url>`.
-fn open_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-            .spawn()?;
-        return Ok(());
+fn open_browser_detached(url: &str) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn()?;
+    Ok(())
+}
+
+fn log(app: &AppHandle, start: Instant, msg: impl std::fmt::Display) {
+    let ms = start.elapsed().as_millis();
+    let _ = app.emit("claude-setup-log", format!("[+{ms}ms] {msg}"));
+}
+
+/// Spawn `cmd.exe /c "<claude> setup-token > <temp> 2>&1"` with a hidden
+/// new console. Returns the Windows PROCESS_INFORMATION so caller can wait/kill.
+#[cfg(windows)]
+fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+        CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, PROCESS_CREATION_FLAGS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let mut cmdline_w: Vec<u16> = OsStr::new(command_line).encode_wide().chain([0]).collect();
+
+    let mut si = STARTUPINFOW::default();
+    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE.0 as u16;
+
+    let mut pi = PROCESS_INFORMATION::default();
+
+    unsafe {
+        CreateProcessW(
+            None,
+            PWSTR::from_raw(cmdline_w.as_mut_ptr()),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(CREATE_NEW_CONSOLE.0 | CREATE_UNICODE_ENVIRONMENT.0),
+            None,
+            None,
+            &si,
+            &mut pi,
+        )
+        .map_err(|e| anyhow!("CreateProcessW: {e}"))?;
     }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
-        Ok(())
+
+    Ok(HiddenChild {
+        process: pi.hProcess,
+        thread: pi.hThread,
+        pid: pi.dwProcessId,
+    })
+}
+
+#[cfg(windows)]
+struct HiddenChild {
+    process: windows::Win32::Foundation::HANDLE,
+    thread: windows::Win32::Foundation::HANDLE,
+    pid: u32,
+}
+
+#[cfg(windows)]
+impl HiddenChild {
+    fn try_wait(&self) -> Option<u32> {
+        use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+        unsafe {
+            let w = WaitForSingleObject(self.process, 0);
+            if w == WAIT_OBJECT_0 {
+                let mut code = 0u32;
+                let _ = GetExitCodeProcess(self.process, &mut code);
+                Some(code)
+            } else if w == WAIT_TIMEOUT {
+                None
+            } else {
+                Some(u32::MAX)
+            }
+        }
     }
+
+    fn kill(&self) {
+        use windows::Win32::System::Threading::TerminateProcess;
+        unsafe {
+            let _ = TerminateProcess(self.process, 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HiddenChild {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        unsafe {
+            let _ = CloseHandle(self.process);
+            let _ = CloseHandle(self.thread);
+        }
+    }
+}
+
+fn temp_output_file() -> PathBuf {
+    let dir = std::env::temp_dir();
+    let name = format!(
+        "toddler-claude-setup-{}.log",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    dir.join(name)
 }
 
 pub async fn run(app: AppHandle) -> Result<String> {
     let bin = crate::tool_discovery::find_claude().ok_or_else(|| {
         anyhow!(
-            "Claude Code not found. Install via `winget install Anthropic.ClaudeCode` or from https://claude.ai/install."
+            "Claude Code not found. Install via `winget install Anthropic.ClaudeCode`."
         )
     })?;
     let app_clone = app.clone();
@@ -146,134 +218,109 @@ pub async fn run(app: AppHandle) -> Result<String> {
     Ok(token)
 }
 
-fn log(app: &AppHandle, start: Instant, msg: impl std::fmt::Display) {
-    let ms = start.elapsed().as_millis();
-    let _ = app.emit("claude-setup-log", format!("[+{ms}ms] {msg}"));
-}
-
-fn run_blocking(app: AppHandle, bin: std::path::PathBuf) -> Result<String> {
+#[cfg(windows)]
+fn run_blocking(app: AppHandle, bin: PathBuf) -> Result<String> {
     let start = Instant::now();
     log(&app, start, format!("spawning: {}", bin.display()));
 
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 40,
-            cols: 140,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| anyhow!("openpty: {}", e))?;
+    let tempfile = temp_output_file();
+    // Pre-create the file so our polling never trips on "file not found".
+    std::fs::write(&tempfile, b"").ok();
 
-    let mut cmd = CommandBuilder::new(&bin);
-    cmd.arg("setup-token");
-    if let Some(cwd) = dirs::home_dir() {
-        cmd.cwd(cwd);
-    }
-    for (k, v) in std::env::vars() {
-        cmd.env(k, v);
-    }
-    // Tell Claude to behave non-interactively with no color
-    cmd.env("NO_COLOR", "1");
-    cmd.env("CLICOLOR", "0");
-    cmd.env("TERM", "xterm-256color");
-    // Some CLIs respect BROWSER=""—but Claude uses its own opener; we open it ourselves.
+    // cmd.exe handles the `>` redirect. Output (stdout + stderr) goes to tempfile.
+    // Stdin inherits from the new hidden console, which IS a TTY — so Ink is happy.
+    let cmdline = format!(
+        "cmd.exe /c \"\"{}\" setup-token > \"{}\" 2>&1\"",
+        bin.display(),
+        tempfile.display()
+    );
+    log(&app, start, format!("cmdline: {cmdline}"));
 
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| anyhow!("spawn: {}", e))?;
-    drop(pair.slave);
-    log(&app, start, "spawned, waiting for output…");
+    let child = spawn_hidden_console(&cmdline)?;
+    log(
+        &app,
+        start,
+        format!("spawned PID {} (hidden console); polling {}…", child.pid, tempfile.display()),
+    );
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| anyhow!("clone reader: {}", e))?;
-    let _writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| anyhow!("take writer: {}", e))?;
+    let mut opened_browser = false;
+    let mut found_token: Option<String> = None;
+    let mut seen_bytes: u64 = 0;
+    let deadline = Instant::now() + Duration::from_secs(10 * 60);
 
-    let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let url_opened: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    loop {
+        std::thread::sleep(Duration::from_millis(300));
 
-    let token_slot_r = token_slot.clone();
-    let url_opened_r = url_opened.clone();
-    let app_r = app.clone();
+        if let Ok(bytes) = std::fs::read(&tempfile) {
+            if bytes.len() as u64 > seen_bytes {
+                seen_bytes = bytes.len() as u64;
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let clean = strip_ansi(&text);
 
-    let reader_thread = std::thread::spawn(move || -> Result<()> {
-        let mut buf = [0u8; 4096];
-        let mut accumulated = String::new();
-        loop {
-            let n = match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            let chunk = String::from_utf8_lossy(&buf[..n]);
-            accumulated.push_str(&chunk);
-            let clean = strip_ansi(&accumulated);
+                // Emit last ~400 chars to frontend so user sees progress
+                let tail: String = clean.chars().rev().take(400).collect::<String>().chars().rev().collect();
+                let last_line = tail.lines().last().unwrap_or(&tail).trim();
+                if !last_line.is_empty() {
+                    log(&app, start, format!("output: {}", last_line));
+                }
 
-            // Always emit whatever new lines came through so user sees progress
-            while let Some(pos) = accumulated.find('\n') {
-                let raw_line = accumulated[..pos].to_string();
-                accumulated.drain(..=pos);
-                let line = strip_ansi(&raw_line);
-                let trimmed = line.trim_end_matches('\r').trim().to_string();
-                if !trimmed.is_empty() {
-                    log(&app_r, start, &trimmed);
+                if !opened_browser {
+                    if let Some(url) = extract_url(&clean) {
+                        opened_browser = true;
+                        log(&app, start, format!("URL → {}", url));
+                        match open_browser_detached(&url) {
+                            Ok(_) => log(&app, start, "browser spawn ok"),
+                            Err(e) => log(&app, start, format!("browser spawn error: {}", e)),
+                        }
+                    }
+                }
+
+                if let Some(t) = extract_token(&clean) {
+                    log(&app, start, format!("token captured ({} chars)", t.len()));
+                    found_token = Some(t);
+                    break;
                 }
             }
+        }
 
-            // Check URL in the full cleaned buffer (cover partial lines)
-            if !*url_opened_r.lock().unwrap() {
-                if let Some(url) = extract_url(&clean) {
-                    *url_opened_r.lock().unwrap() = true;
-                    log(&app_r, start, format!("URL captured → opening browser: {}", url));
-                    match open_browser(&url) {
-                        Ok(_) => log(&app_r, start, "browser opener spawned"),
-                        Err(e) => log(&app_r, start, format!("browser opener error: {}", e)),
+        if child.try_wait().is_some() {
+            log(&app, start, "claude process exited; draining");
+            std::thread::sleep(Duration::from_millis(300));
+            // Final drain
+            if let Ok(bytes) = std::fs::read(&tempfile) {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                let clean = strip_ansi(&text);
+                if found_token.is_none() {
+                    if let Some(t) = extract_token(&clean) {
+                        found_token = Some(t);
+                    }
+                }
+                if !opened_browser {
+                    if let Some(url) = extract_url(&clean) {
+                        let _ = open_browser_detached(&url);
                     }
                 }
             }
-
-            // Check token in the cleaned buffer
-            if token_slot_r.lock().unwrap().is_none() {
-                if let Some(t) = extract_token(&clean) {
-                    log(&app_r, start, format!("token captured ({} chars)", t.len()));
-                    *token_slot_r.lock().unwrap() = Some(t);
-                }
-            }
-        }
-        Ok(())
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(10 * 60);
-    loop {
-        if token_slot.lock().unwrap().is_some() {
-            std::thread::sleep(Duration::from_millis(200));
             break;
         }
-        if let Ok(Some(_)) = child.try_wait() {
-            log(&app, start, "claude process exited; draining output");
-            std::thread::sleep(Duration::from_millis(400));
-            break;
-        }
+
         if Instant::now() > deadline {
-            log(&app, start, "10-minute deadline reached, giving up");
+            log(&app, start, "10-minute deadline reached");
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
     }
 
-    let _ = child.kill();
-    let _ = reader_thread.join();
+    child.kill();
+    let _ = std::fs::remove_file(&tempfile);
 
-    let token = token_slot.lock().unwrap().clone();
-    token.ok_or_else(|| {
+    found_token.ok_or_else(|| {
         anyhow!(
-            "no token captured — paste manually using the option below. Output log is visible in the app."
+            "no token captured — if the browser opened but the page said \"can't connect\", claude setup-token crashed before its callback listener started. Use the manual option: open a terminal, run `claude setup-token`, paste the token."
         )
     })
+}
+
+#[cfg(not(windows))]
+fn run_blocking(_app: AppHandle, _bin: PathBuf) -> Result<String> {
+    Err(anyhow!("claude auto setup is Windows-only"))
 }
