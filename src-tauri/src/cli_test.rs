@@ -114,6 +114,22 @@ async fn run_test(name: &str) -> anyhow::Result<serde_json::Value> {
             "github": credentials::get(keys::GITHUB_TOKEN)?.is_some(),
             "fly":    credentials::get(keys::FLY_TOKEN)?.is_some(),
         })),
+        "keyring-roundtrip" => {
+            let marker = format!("test-{}", uuid::Uuid::new_v4());
+            let key = "test_roundtrip";
+            let set_res = credentials::set(key, &marker);
+            let got = credentials::get(key);
+            let del = credentials::delete(key);
+            Ok(json!({
+                "set_ok": set_res.is_ok(),
+                "set_err": set_res.err().map(|e| e.to_string()),
+                "get_ok": got.as_ref().map(|v| v.is_some()).unwrap_or(false),
+                "get_matches": got.as_ref().ok().and_then(|o| o.as_ref()).map(|v| v == &marker).unwrap_or(false),
+                "get_value_len": got.as_ref().ok().and_then(|o| o.as_ref()).map(|v| v.len()).unwrap_or(0),
+                "get_err": got.err().map(|e| e.to_string()),
+                "delete_ok": del.is_ok(),
+            }))
+        }
         other => Err(anyhow::anyhow!(
             "unknown test `{}`. Valid: diagnose, github-cli, fly-cli, fly-api, stored-tokens",
             other
