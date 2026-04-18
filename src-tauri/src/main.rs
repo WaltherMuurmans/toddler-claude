@@ -22,11 +22,13 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(session::SessionState::default())
+        .manage(claude_setup::ClaudeSessionState::default())
         .invoke_handler(tauri::generate_handler![
             commands::store_claude_token,
             commands::has_claude_token,
             commands::clear_claude_token,
             commands::claude_auto_setup,
+            commands::claude_submit_code,
             commands::github_device_start,
             commands::github_device_poll,
             commands::store_github_token,

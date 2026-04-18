@@ -29,12 +29,22 @@ pub async fn clear_claude_token() -> Result<(), String> {
     credentials::delete(keys::CLAUDE_TOKEN).map_err(e)
 }
 
-/// Runs `claude setup-token`, auto-opens the browser, captures the resulting
-/// token, and stores it. Emits `claude-setup-log` events to the frontend.
+/// Runs `claude setup-token`, captures the resulting token, stores it.
+/// Emits `claude-setup-log` (progress) and `claude-url` (when the OAuth URL is
+/// extracted). Frontend should listen for `claude-url`, show a code-paste UI,
+/// and call `claude_submit_code` when user submits.
 #[tauri::command]
 pub async fn claude_auto_setup(app: AppHandle) -> Result<(), String> {
     let token = claude_setup::run(app).await.map_err(e)?;
     credentials::set(keys::CLAUDE_TOKEN, &token).map_err(e)
+}
+
+/// Inject the user-supplied OAuth code into the running claude setup-token
+/// process's console stdin. Must be called after `claude_auto_setup` has
+/// emitted `claude-url`.
+#[tauri::command]
+pub async fn claude_submit_code(app: AppHandle, code: String) -> Result<(), String> {
+    claude_setup::submit_code(&app, code.trim()).map_err(e)
 }
 
 #[tauri::command]

@@ -42,7 +42,11 @@ export default function Setup({
   const [claudeErr, setClaudeErr] = useState<string | null>(null);
   const [showClaudeManual, setShowClaudeManual] = useState(false);
   const [claudePaste, setClaudePaste] = useState("");
-  const unlistenRef = useRef<UnlistenFn | null>(null);
+  const [claudeUrl, setClaudeUrl] = useState<string | null>(null);
+  const [claudeCode, setClaudeCode] = useState("");
+  const [claudeCodeSubmitting, setClaudeCodeSubmitting] = useState(false);
+  const unlistenLogRef = useRef<UnlistenFn | null>(null);
+  const unlistenUrlRef = useRef<UnlistenFn | null>(null);
 
   // Fly
   const [flyToken, setFlyToken] = useState("");
@@ -77,7 +81,8 @@ export default function Setup({
       setFlyOk(await invoke<boolean>("has_fly_token"));
     })();
     return () => {
-      if (unlistenRef.current) unlistenRef.current();
+      if (unlistenLogRef.current) unlistenLogRef.current();
+      if (unlistenUrlRef.current) unlistenUrlRef.current();
       pollStop.current = true;
     };
   }, []);
@@ -86,11 +91,17 @@ export default function Setup({
   async function claudeAuto() {
     setClaudeErr(null);
     setClaudeLog([]);
+    setClaudeUrl(null);
+    setClaudeCode("");
     setClaudeBusy(true);
     try {
-      unlistenRef.current = await listen<string>(
+      unlistenLogRef.current = await listen<string>(
         "claude-setup-log",
         (evt) => setClaudeLog((prev) => [...prev.slice(-50), evt.payload]),
+      );
+      unlistenUrlRef.current = await listen<string>(
+        "claude-url",
+        (evt) => setClaudeUrl(evt.payload),
       );
       await invoke("claude_auto_setup");
       setClaudeOk(true);
@@ -102,10 +113,29 @@ export default function Setup({
       );
     } finally {
       setClaudeBusy(false);
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
+      setClaudeUrl(null);
+      if (unlistenLogRef.current) {
+        unlistenLogRef.current();
+        unlistenLogRef.current = null;
       }
+      if (unlistenUrlRef.current) {
+        unlistenUrlRef.current();
+        unlistenUrlRef.current = null;
+      }
+    }
+  }
+
+  async function submitClaudeCode() {
+    setClaudeErr(null);
+    setClaudeCodeSubmitting(true);
+    try {
+      await invoke("claude_submit_code", { code: claudeCode.trim() });
+      setClaudeCode("");
+      // claude will now exchange; keep claudeBusy true, token event will fire
+    } catch (err: any) {
+      setClaudeErr("Submitting code failed: " + String(err));
+    } finally {
+      setClaudeCodeSubmitting(false);
     }
   }
 
@@ -274,25 +304,52 @@ export default function Setup({
         </h2>
         {!showClaudeManual ? (
           <>
-            <p>
-              Click below. A browser window will open, you approve there, then
-              come back here.
-            </p>
-            <button
-              className="primary"
-              onClick={claudeAuto}
-              disabled={claudeBusy}
-            >
-              {claudeBusy ? "Waiting for browser approval…" : "Sign in with Claude"}
-            </button>
+            {!claudeBusy && !claudeUrl && (
+              <>
+                <p>
+                  Click below. A browser window will open for you to approve,
+                  then you'll paste the shown code back here.
+                </p>
+                <button className="primary" onClick={claudeAuto}>
+                  Sign in with Claude
+                </button>
+              </>
+            )}
+            {claudeBusy && !claudeUrl && (
+              <p className="muted">Starting Claude setup…</p>
+            )}
+            {claudeUrl && (
+              <div className="device-prompt">
+                <p>A browser tab should be open. If not:</p>
+                <button onClick={() => openExternal(claudeUrl)}>
+                  Open Claude sign-in
+                </button>
+                <p style={{ marginTop: 16 }}>
+                  After approving, Anthropic will show you a code. Paste it
+                  below:
+                </p>
+                <input
+                  type="text"
+                  placeholder="Paste the code here"
+                  value={claudeCode}
+                  onChange={(e) => setClaudeCode(e.target.value)}
+                  autoFocus
+                />
+                <button
+                  className="primary"
+                  onClick={submitClaudeCode}
+                  disabled={!claudeCode || claudeCodeSubmitting}
+                >
+                  {claudeCodeSubmitting ? "Submitting…" : "Submit code"}
+                </button>
+              </div>
+            )}
             {claudeLog.length > 0 && (
-              <pre className="log">
-                {claudeLog.slice(-15).join("\n")}
-              </pre>
+              <pre className="log">{claudeLog.slice(-15).join("\n")}</pre>
             )}
             {claudeErr && <p className="err">{claudeErr}</p>}
             <p className="muted small">
-              Works if Claude Code is installed. No terminal needed.
+              Requires Claude Code installed. No terminal needed.
             </p>
             <button className="link" onClick={() => setShowClaudeManual(true)}>
               Or paste a token manually →

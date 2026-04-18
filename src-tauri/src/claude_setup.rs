@@ -1,14 +1,22 @@
-//! Runs `claude setup-token` in a **hidden** real Windows console so Ink's
-//! raw-mode TTY check passes (portable-pty's ConPTY wasn't enough for
-//! bun-bundled Ink). Redirects stdout+stderr to a temp file; we poll the
-//! file for the URL (to open the browser) and the final OAuth token.
+//! End-to-end automation of `claude setup-token`:
+//!   1. Spawn claude in a hidden real Windows console (Ink satisfied)
+//!   2. Poll its redirected stdout for the OAuth URL → auto-open browser
+//!      + emit "claude-url" event for the UI
+//!   3. The UI captures the code from the user (who copied it from Anthropic's
+//!      code-display page) and calls `claude_submit_code`
+//!   4. We AttachConsole(child_pid) + WriteConsoleInputW to inject the code
+//!      + Enter into claude's console input buffer — claude reads it as stdin
+//!   5. Poll output for the token, capture, emit "claude-token"
 
 use anyhow::{anyhow, Result};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+// ───────────────────────── ANSI + parsing ─────────────────────────
 
 pub fn strip_ansi(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -107,8 +115,15 @@ fn log(app: &AppHandle, start: Instant, msg: impl std::fmt::Display) {
     let _ = app.emit("claude-setup-log", format!("[+{ms}ms] {msg}"));
 }
 
-/// Spawn `cmd.exe /c "<claude> setup-token > <temp> 2>&1"` with a hidden
-/// new console. Returns the Windows PROCESS_INFORMATION so caller can wait/kill.
+// ───────────────────────── spawn ─────────────────────────
+
+#[cfg(windows)]
+pub struct HiddenChild {
+    pub process: windows::Win32::Foundation::HANDLE,
+    pub thread: windows::Win32::Foundation::HANDLE,
+    pub pid: u32,
+}
+
 #[cfg(windows)]
 pub fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
     use windows::core::PWSTR;
@@ -119,14 +134,11 @@ pub fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let mut cmdline_w: Vec<u16> = OsStr::new(command_line).encode_wide().chain([0]).collect();
-
     let mut si = STARTUPINFOW::default();
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE.0 as u16;
-
     let mut pi = PROCESS_INFORMATION::default();
-
     unsafe {
         CreateProcessW(
             None,
@@ -142,19 +154,11 @@ pub fn spawn_hidden_console(command_line: &str) -> Result<HiddenChild> {
         )
         .map_err(|e| anyhow!("CreateProcessW: {e}"))?;
     }
-
     Ok(HiddenChild {
         process: pi.hProcess,
         thread: pi.hThread,
         pid: pi.dwProcessId,
     })
-}
-
-#[cfg(windows)]
-pub struct HiddenChild {
-    pub process: windows::Win32::Foundation::HANDLE,
-    pub thread: windows::Win32::Foundation::HANDLE,
-    pub pid: u32,
 }
 
 #[cfg(windows)]
@@ -175,7 +179,6 @@ impl HiddenChild {
             }
         }
     }
-
     pub fn kill(&self) {
         use windows::Win32::System::Threading::TerminateProcess;
         unsafe {
@@ -195,27 +198,100 @@ impl Drop for HiddenChild {
     }
 }
 
+// ───────────────────────── stdin injection ─────────────────────────
+
+/// Inject `text` + Enter into the target process's console input buffer.
+/// `pid` must be a child spawned with CREATE_NEW_CONSOLE.
+#[cfg(windows)]
+pub fn inject_to_console(pid: u32, text: &str) -> Result<()> {
+    use windows::Win32::Foundation::{BOOL, HANDLE};
+    use windows::Win32::System::Console::{
+        AttachConsole, FreeConsole, GetStdHandle, WriteConsoleInputW, INPUT_RECORD,
+        INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
+    };
+
+    unsafe {
+        // Detach any console we may be attached to (harmless no-op for a GUI app).
+        let _ = FreeConsole();
+        AttachConsole(pid).map_err(|e| anyhow!("AttachConsole({pid}): {e}"))?;
+
+        let in_h: HANDLE = GetStdHandle(STD_INPUT_HANDLE)
+            .map_err(|e| anyhow!("GetStdHandle(STD_INPUT): {e}"))?;
+
+        let mut records: Vec<INPUT_RECORD> = Vec::with_capacity(text.chars().count() * 2 + 2);
+        let push = |recs: &mut Vec<INPUT_RECORD>, ch: u16, down: BOOL| {
+            let ker = KEY_EVENT_RECORD {
+                bKeyDown: down,
+                wRepeatCount: 1,
+                wVirtualKeyCode: 0,
+                wVirtualScanCode: 0,
+                uChar: KEY_EVENT_RECORD_0 { UnicodeChar: ch },
+                dwControlKeyState: 0,
+            };
+            recs.push(INPUT_RECORD {
+                EventType: KEY_EVENT as u16,
+                Event: INPUT_RECORD_0 { KeyEvent: ker },
+            });
+        };
+        for c in text.chars() {
+            let u = c as u32;
+            if u > 0xffff {
+                let _ = FreeConsole();
+                return Err(anyhow!("non-BMP character not supported"));
+            }
+            push(&mut records, u as u16, true.into());
+            push(&mut records, u as u16, false.into());
+        }
+        // Enter key = \r
+        push(&mut records, 0x0d, true.into());
+        push(&mut records, 0x0d, false.into());
+
+        let mut written = 0u32;
+        WriteConsoleInputW(in_h, &records, &mut written)
+            .map_err(|e| anyhow!("WriteConsoleInputW: {e}"))?;
+
+        let _ = FreeConsole();
+        if (written as usize) < records.len() {
+            return Err(anyhow!(
+                "partial write: {} of {} events",
+                written,
+                records.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ───────────────────────── session state ─────────────────────────
+
+#[derive(Default)]
+pub struct ClaudeSessionState {
+    pub inner: Mutex<Option<RunningSession>>,
+}
+
+pub struct RunningSession {
+    pub pid: u32,
+    pub temp_file: PathBuf,
+}
+
 fn temp_output_file() -> PathBuf {
-    let dir = std::env::temp_dir();
-    let name = format!(
+    std::env::temp_dir().join(format!(
         "toddler-claude-setup-{}.log",
         uuid::Uuid::new_v4().as_simple()
-    );
-    dir.join(name)
+    ))
 }
+
+// ───────────────────────── main flow ─────────────────────────
 
 pub async fn run(app: AppHandle) -> Result<String> {
     let bin = crate::tool_discovery::find_claude().ok_or_else(|| {
-        anyhow!(
-            "Claude Code not found. Install via `winget install Anthropic.ClaudeCode`."
-        )
+        anyhow!("Claude Code not found. Install via `winget install Anthropic.ClaudeCode`.")
     })?;
     let app_clone = app.clone();
     let bin_clone = bin.clone();
-    let token = tokio::task::spawn_blocking(move || run_blocking(app_clone, bin_clone))
+    tokio::task::spawn_blocking(move || run_blocking(app_clone, bin_clone))
         .await
-        .map_err(|e| anyhow!("claude-setup task join: {}", e))??;
-    Ok(token)
+        .map_err(|e| anyhow!("claude-setup task join: {}", e))?
 }
 
 #[cfg(windows)]
@@ -224,29 +300,32 @@ fn run_blocking(app: AppHandle, bin: PathBuf) -> Result<String> {
     log(&app, start, format!("spawning: {}", bin.display()));
 
     let tempfile = temp_output_file();
-    // Pre-create the file so our polling never trips on "file not found".
     std::fs::write(&tempfile, b"").ok();
 
-    // cmd.exe handles the `>` redirect. Output (stdout + stderr) goes to tempfile.
-    // Stdin inherits from the new hidden console, which IS a TTY — so Ink is happy.
     let cmdline = format!(
         "cmd.exe /c \"\"{}\" setup-token > \"{}\" 2>&1\"",
         bin.display(),
         tempfile.display()
     );
-    log(&app, start, format!("cmdline: {cmdline}"));
-
     let child = spawn_hidden_console(&cmdline)?;
-    log(
-        &app,
-        start,
-        format!("spawned PID {} (hidden console); polling {}…", child.pid, tempfile.display()),
-    );
+    let pid = child.pid;
+    log(&app, start, format!("spawned PID {}", pid));
+
+    // Publish session state so submit_code can find the pid
+    {
+        use tauri::Manager;
+        let st = app.state::<ClaudeSessionState>();
+        *st.inner.lock().unwrap() = Some(RunningSession {
+            pid,
+            temp_file: tempfile.clone(),
+        });
+    }
 
     let mut opened_browser = false;
+    let mut url_emitted = false;
     let mut found_token: Option<String> = None;
     let mut seen_bytes: u64 = 0;
-    let deadline = Instant::now() + Duration::from_secs(10 * 60);
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
 
     loop {
         std::thread::sleep(Duration::from_millis(300));
@@ -257,20 +336,17 @@ fn run_blocking(app: AppHandle, bin: PathBuf) -> Result<String> {
                 let text = String::from_utf8_lossy(&bytes).to_string();
                 let clean = strip_ansi(&text);
 
-                // Emit last ~400 chars to frontend so user sees progress
-                let tail: String = clean.chars().rev().take(400).collect::<String>().chars().rev().collect();
-                let last_line = tail.lines().last().unwrap_or(&tail).trim();
-                if !last_line.is_empty() {
-                    log(&app, start, format!("output: {}", last_line));
-                }
-
-                if !opened_browser {
+                if !url_emitted {
                     if let Some(url) = extract_url(&clean) {
-                        opened_browser = true;
-                        log(&app, start, format!("URL → {}", url));
-                        match open_browser_detached(&url) {
-                            Ok(_) => log(&app, start, "browser spawn ok"),
-                            Err(e) => log(&app, start, format!("browser spawn error: {}", e)),
+                        url_emitted = true;
+                        log(&app, start, format!("URL: {}", url));
+                        let _ = app.emit("claude-url", url.clone());
+                        if !opened_browser {
+                            opened_browser = true;
+                            match open_browser_detached(&url) {
+                                Ok(_) => log(&app, start, "browser spawn ok"),
+                                Err(e) => log(&app, start, format!("browser spawn error: {}", e)),
+                            }
                         }
                     }
                 }
@@ -284,9 +360,8 @@ fn run_blocking(app: AppHandle, bin: PathBuf) -> Result<String> {
         }
 
         if child.try_wait().is_some() {
-            log(&app, start, "claude process exited; draining");
+            log(&app, start, "claude process exited; final drain");
             std::thread::sleep(Duration::from_millis(300));
-            // Final drain
             if let Ok(bytes) = std::fs::read(&tempfile) {
                 let text = String::from_utf8_lossy(&bytes).to_string();
                 let clean = strip_ansi(&text);
@@ -295,32 +370,41 @@ fn run_blocking(app: AppHandle, bin: PathBuf) -> Result<String> {
                         found_token = Some(t);
                     }
                 }
-                if !opened_browser {
-                    if let Some(url) = extract_url(&clean) {
-                        let _ = open_browser_detached(&url);
-                    }
-                }
             }
             break;
         }
 
         if Instant::now() > deadline {
-            log(&app, start, "10-minute deadline reached");
+            log(&app, start, "15-minute deadline reached");
             break;
         }
     }
 
     child.kill();
     let _ = std::fs::remove_file(&tempfile);
+    {
+        use tauri::Manager;
+        let st = app.state::<ClaudeSessionState>();
+        *st.inner.lock().unwrap() = None;
+    }
 
     found_token.ok_or_else(|| {
-        anyhow!(
-            "no token captured — if the browser opened but the page said \"can't connect\", claude setup-token crashed before its callback listener started. Use the manual option: open a terminal, run `claude setup-token`, paste the token."
-        )
+        anyhow!("claude auth did not complete. Use the manual paste option.")
     })
 }
 
 #[cfg(not(windows))]
 fn run_blocking(_app: AppHandle, _bin: PathBuf) -> Result<String> {
     Err(anyhow!("claude auto setup is Windows-only"))
+}
+
+pub fn submit_code(app: &AppHandle, code: &str) -> Result<()> {
+    use tauri::Manager;
+    let pid = {
+        let st = app.state::<ClaudeSessionState>();
+        let guard = st.inner.lock().unwrap();
+        guard.as_ref().map(|s| s.pid)
+    };
+    let pid = pid.ok_or_else(|| anyhow!("no claude setup session is running"))?;
+    inject_to_console(pid, code)
 }
