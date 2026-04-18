@@ -24,8 +24,8 @@ base64 = "0.22"
 thiserror = "1"
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
-keyring = "3"
 log = "0.4"
+windows = { version = "0.58", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 env_logger = "0.11"
 dirs = "5"
 which = "6"
