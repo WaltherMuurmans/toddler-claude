@@ -114,6 +114,44 @@ async fn run_test(name: &str) -> anyhow::Result<serde_json::Value> {
             "github": credentials::get(keys::GITHUB_TOKEN)?.is_some(),
             "fly":    credentials::get(keys::FLY_TOKEN)?.is_some(),
         })),
+        "claude-probe-piped" => {
+            // Alternative spawn: Stdio::piped() for stdin, no new console.
+            // Check whether Ink raw-mode error appears.
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            let bin = tool_discovery::find_claude()
+                .ok_or_else(|| anyhow::anyhow!("claude not found"))?;
+            let mut cmd = Command::new(&bin);
+            cmd.arg("setup-token");
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = cmd.spawn()?;
+            // Close stdin immediately
+            drop(child.stdin.take());
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            let _ = child.kill();
+            let out = child.wait_with_output()?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let combined = format!("=STDOUT=\n{stdout}\n=STDERR=\n{stderr}");
+            let clean = crate::claude_setup::strip_ansi(&combined);
+            let has_raw = clean.contains("Raw mode is not supported");
+            let url = crate::claude_setup::extract_url(&clean);
+            Ok(json!({
+                "ink_raw_mode_error": has_raw,
+                "url_found": url,
+                "stdout_len": stdout.len(),
+                "stderr_len": stderr.len(),
+                "combined_head_600": clean.chars().take(600).collect::<String>(),
+            }))
+        }
         "claude-probe" => {
             // Spawn claude setup-token exactly like the app does, watch ~12s,
             // report: did it start, does the output contain the raw-mode error,
