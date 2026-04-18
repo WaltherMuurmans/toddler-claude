@@ -53,8 +53,10 @@ RUN curl -fsSL -o /tmp/flutter.tar.xz \
  && flutter precache --no-android --no-ios --no-web --no-windows --no-macos --no-linux-desktop --no-universal || true
 
 # Claude Code CLI (installs to ~/.local/bin/claude)
-RUN curl -fsSL https://claude.ai/install.sh | bash || \
-    npm config set prefix "$HOME/.local" && npm install -g @anthropic-ai/claude-code
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+ && ls -la /home/dev/.local/bin/claude 2>/dev/null || \
+    ( mkdir -p /home/dev/.local && npm config set prefix /home/dev/.local \
+      && npm install -g @anthropic-ai/claude-code )
 
 USER root
 COPY boot.sh /opt/boot.sh
