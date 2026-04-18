@@ -124,19 +124,40 @@ export default function Setup({
   // ───── GitHub ─────
   async function githubCliFastPath() {
     setGhErr(null);
+    pollStop.current = true;
+    setDevice(null);
+    // Step 2a: sign in
     try {
       const login = await invoke<string>("github_cli_signin");
       setGhLogin(login);
       setGhOk(true);
-      const r = await invoke<Repo[]>("list_github_repos");
-      setRepos(r);
-      setStep(3);
+      setGhErr(null);
     } catch (err: any) {
       setGhErr(
-        "gh CLI not available or not logged in: " +
+        "gh CLI sign-in failed: " +
           String(err) +
-          " — try the Browser or PAT option.",
+          " — try the browser or PAT option.",
       );
+      return;
+    }
+    // Step 2b: load repos (separate so errors here don't nuke the sign-in)
+    await loadRepos();
+  }
+
+  async function loadRepos() {
+    setGhErr(null);
+    try {
+      const r = await invoke<Repo[]>("list_github_repos");
+      setRepos(r);
+      if (r.length === 0) {
+        setGhErr(
+          "Signed in, but GitHub returned no repositories. If the token is from `gh auth`, make sure it has `repo` scope (try `gh auth refresh -s repo`).",
+        );
+      } else {
+        setStep(3);
+      }
+    } catch (err: any) {
+      setGhErr("Failed to load repositories: " + String(err));
     }
   }
 
@@ -163,9 +184,7 @@ export default function Setup({
             await invoke("store_github_token", { token });
             setGhOk(true);
             setDevice(null);
-            const r = await invoke<Repo[]>("list_github_repos");
-            setRepos(r);
-            setStep(3);
+            await loadRepos();
             return;
           }
         } catch (err) {
@@ -185,14 +204,13 @@ export default function Setup({
     setGhErr(null);
     try {
       await invoke("store_github_token", { token: ghPat.trim() });
-      const r = await invoke<Repo[]>("list_github_repos");
-      setRepos(r);
       setGhOk(true);
       setGhPat("");
-      setStep(3);
     } catch (err: any) {
       setGhErr(String(err));
+      return;
     }
+    await loadRepos();
   }
 
   // ───── Fly ─────
@@ -314,7 +332,21 @@ export default function Setup({
           2. Connect GitHub {ghOk && <span className="ok">✓</span>}
           {ghLogin && <span className="muted"> — {ghLogin}</span>}
         </h2>
-        {!showGhManual ? (
+        {ghOk ? (
+          <>
+            <p className="ok">Signed in{ghLogin ? ` as ${ghLogin}` : ""}.</p>
+            <p className="muted small">
+              {repos.length > 0
+                ? `${repos.length} repositories loaded.`
+                : "Loading repositories…"}
+            </p>
+            {ghErr && <p className="err">{ghErr}</p>}
+            <button onClick={loadRepos}>Reload repositories</button>{" "}
+            <button className="link" onClick={() => setStep(3)}>
+              Continue →
+            </button>
+          </>
+        ) : !showGhManual ? (
           <>
             <p>
               <strong>Fastest:</strong> if you already use the GitHub CLI (

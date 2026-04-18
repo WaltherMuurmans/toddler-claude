@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod claude_setup;
+mod cli_test;
 mod commands;
 mod credentials;
 mod fly;
@@ -13,6 +14,9 @@ use tauri::Manager;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // If invoked with --test <name>, run headlessly and exit before Tauri starts.
+    cli_test::maybe_run_and_exit();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
