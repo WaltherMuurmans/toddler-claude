@@ -269,7 +269,7 @@ export default function Setup({
             </button>
             {claudeLog.length > 0 && (
               <pre className="log">
-                {claudeLog.slice(-5).join("\n")}
+                {claudeLog.slice(-15).join("\n")}
               </pre>
             )}
             {claudeErr && <p className="err">{claudeErr}</p>}

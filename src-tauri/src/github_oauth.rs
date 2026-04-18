@@ -100,20 +100,37 @@ pub async fn device_poll(device_code: &str) -> Result<Option<String>> {
 /// grab its token directly. Zero browser interaction.
 pub fn gh_cli_token() -> Result<String> {
     use std::process::Command;
-    let out = Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .map_err(|e| anyhow!("gh CLI not found on PATH: {}", e))?;
+    let bin = crate::tool_discovery::find_gh().ok_or_else(|| {
+        anyhow!(
+            "gh CLI not found. Install from https://cli.github.com or via `winget install GitHub.cli`, then run `gh auth login`."
+        )
+    })?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["auth", "token"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| {
+        anyhow!(
+            "failed to execute {}: {}",
+            bin.display(),
+            e
+        )
+    })?;
     if !out.status.success() {
         return Err(anyhow!(
-            "gh auth token failed: {}",
+            "gh auth token failed (status {:?}): {}",
+            out.status.code(),
             String::from_utf8_lossy(&out.stderr)
         ));
     }
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if token.is_empty() {
         return Err(anyhow!(
-            "gh auth token returned empty; run `gh auth login` first"
+            "gh auth token returned empty. In a terminal run: gh auth login"
         ));
     }
     Ok(token)

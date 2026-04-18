@@ -7,6 +7,7 @@ mod fly;
 mod fly_setup;
 mod github_oauth;
 mod session;
+mod tool_discovery;
 
 use tauri::Manager;
 

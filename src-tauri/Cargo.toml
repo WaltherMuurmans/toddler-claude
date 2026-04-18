@@ -30,6 +30,7 @@ env_logger = "0.11"
 dirs = "5"
 which = "6"
 webbrowser = "1"
+portable-pty = "0.9"
 
 [features]
 default = ["custom-protocol"]

@@ -5,10 +5,22 @@ use anyhow::{anyhow, Result};
 use std::process::Command;
 
 pub fn flyctl_token() -> Result<String> {
-    let out = Command::new("flyctl")
-        .args(["auth", "token"])
-        .output()
-        .map_err(|e| anyhow!("flyctl not found on PATH: {}", e))?;
+    let bin = crate::tool_discovery::find_flyctl().ok_or_else(|| {
+        anyhow!(
+            "flyctl not found. Install from https://fly.io/docs/flyctl/install/, then run `flyctl auth login`."
+        )
+    })?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(["auth", "token"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| {
+        anyhow!("failed to execute {}: {}", bin.display(), e)
+    })?;
     if !out.status.success() {
         return Err(anyhow!(
             "flyctl auth token failed: {}",
@@ -18,7 +30,7 @@ pub fn flyctl_token() -> Result<String> {
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if token.is_empty() {
         return Err(anyhow!(
-            "flyctl auth token returned empty; run `flyctl auth login` first"
+            "flyctl auth token returned empty. In a terminal run: flyctl auth login"
         ));
     }
     Ok(token)
